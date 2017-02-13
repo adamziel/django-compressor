@@ -3,6 +3,7 @@ import io
 import logging
 import subprocess
 
+from importlib import import_module
 from platform import system
 
 if system() != "Windows":
@@ -19,13 +20,10 @@ else:
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.temp import NamedTemporaryFile
 
-try:
-    from importlib import import_module
-except ImportError:
-    from django.utils.importlib import import_module
-
 from django.utils.encoding import smart_text
 from django.utils import six
+
+from compressor.cache import cache, get_precompiler_cachekey
 
 from compressor.conf import settings
 from compressor.exceptions import FilterError
@@ -42,8 +40,8 @@ class FilterBase(object):
     Subclasses should implement `input` and/or `output` methods which must
     return a string (unicode under python 2) or raise a NotImplementedError.
     """
-    def __init__(self, content, filter_type=None, filename=None, verbose=0,
-                 charset=None):
+    def __init__(self, content, attrs=None, filter_type=None, filename=None,
+                 verbose=0, charset=None, **kwargs):
         self.type = filter_type or getattr(self, 'type', None)
         self.content = content
         self.verbose = verbose or settings.COMPRESS_VERBOSE
@@ -116,8 +114,8 @@ class CompilerFilter(FilterBase):
     options = ()
     default_encoding = settings.FILE_CHARSET
 
-    def __init__(self, content, command=None, *args, **kwargs):
-        super(CompilerFilter, self).__init__(content, *args, **kwargs)
+    def __init__(self, content, command=None, **kwargs):
+        super(CompilerFilter, self).__init__(content, **kwargs)
         self.cwd = None
 
         if command:
@@ -128,7 +126,7 @@ class CompilerFilter(FilterBase):
         if isinstance(self.options, dict):
             # turn dict into a tuple
             new_options = ()
-            for item in kwargs.items():
+            for item in self.options.items():
                 new_options += (item,)
             self.options = new_options
 
@@ -140,6 +138,7 @@ class CompilerFilter(FilterBase):
         self.infile = self.outfile = None
 
     def input(self, **kwargs):
+
         encoding = self.default_encoding
         options = dict(self.options)
 
@@ -208,5 +207,26 @@ class CompilerFilter(FilterBase):
                 self.infile.close()
             if self.outfile is not None:
                 self.outfile.close()
-
         return smart_text(filtered)
+
+
+class CachedCompilerFilter(CompilerFilter):
+
+    def __init__(self, mimetype, *args, **kwargs):
+        self.mimetype = mimetype
+        super(CachedCompilerFilter, self).__init__(*args, **kwargs)
+
+    def input(self, **kwargs):
+        if self.mimetype in settings.COMPRESS_CACHEABLE_PRECOMPILERS:
+            key = self.get_cache_key()
+            data = cache.get(key)
+            if data is not None:
+                return smart_text(data)
+            filtered = super(CachedCompilerFilter, self).input(**kwargs)
+            cache.set(key, filtered, settings.COMPRESS_REBUILD_TIMEOUT)
+            return filtered
+        else:
+            return super(CachedCompilerFilter, self).input(**kwargs)
+
+    def get_cache_key(self):
+        return get_precompiler_cachekey(self.command, self.content)

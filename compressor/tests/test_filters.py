@@ -3,23 +3,22 @@ from collections import defaultdict
 import io
 import os
 import sys
-import textwrap
+import mock
 
 from django.utils import six
+from django.utils.encoding import smart_text
 from django.test import TestCase
-from django.utils import unittest
 from django.test.utils import override_settings
 
-from compressor.cache import get_hashed_mtime, get_hashed_content
+from compressor.cache import cache, get_hashed_mtime, get_hashed_content
 from compressor.conf import settings
 from compressor.css import CssCompressor
-from compressor.utils import find_command
-from compressor.filters.base import CompilerFilter
-from compressor.filters.cssmin import CSSMinFilter
+from compressor.filters.base import CompilerFilter, CachedCompilerFilter
+from compressor.filters.cssmin import CSSCompressorFilter, rCSSMinFilter
 from compressor.filters.css_default import CssAbsoluteFilter
+from compressor.filters.jsmin import JSMinFilter
 from compressor.filters.template import TemplateFilter
 from compressor.filters.closure import ClosureCompilerFilter
-from compressor.filters.csstidy import CSSTidyFilter
 from compressor.filters.yuglify import YUglifyCSSFilter, YUglifyJSFilter
 from compressor.filters.yui import YUICSSFilter, YUIJSFilter
 from compressor.filters.cleancss import CleanCSSFilter
@@ -30,31 +29,28 @@ def blankdict(*args, **kwargs):
     return defaultdict(lambda: '', *args, **kwargs)
 
 
-@unittest.skipIf(find_command(settings.COMPRESS_CSSTIDY_BINARY) is None,
-                 'CSStidy binary %r not found' % settings.COMPRESS_CSSTIDY_BINARY)
-class CssTidyTestCase(TestCase):
-    def test_tidy(self):
-        content = textwrap.dedent("""\
-        /* Some comment */
-        font,th,td,p{
-        color: black;
-        }
-        """)
-        ret = CSSTidyFilter(content).input()
-        self.assertIsInstance(ret, six.text_type)
-        self.assertEqual(
-            "font,th,td,p{color:#000;}", CSSTidyFilter(content).input())
-
-
+@override_settings(COMPRESS_CACHEABLE_PRECOMPILERS=('text/css',))
 class PrecompilerTestCase(TestCase):
     def setUp(self):
         self.test_precompiler = os.path.join(test_dir, 'precompiler.py')
         self.setup_infile()
+        self.cached_precompiler_args = dict(
+            content=self.content, charset=settings.FILE_CHARSET,
+            filename=self.filename, mimetype='text/css')
 
     def setup_infile(self, filename='static/css/one.css'):
         self.filename = os.path.join(test_dir, filename)
         with io.open(self.filename, encoding=settings.FILE_CHARSET) as file:
             self.content = file.read()
+
+    def test_precompiler_dict_options(self):
+        command = "%s %s {option}" % (sys.executable, self.test_precompiler)
+        option = ("option", "option",)
+        CompilerFilter.options = dict([option])
+        compiler = CompilerFilter(
+            content=self.content, filename=self.filename,
+            charset=settings.FILE_CHARSET, command=command)
+        self.assertIn(option, compiler.options)
 
     def test_precompiler_infile_outfile(self):
         command = '%s %s -f {infile} -o {outfile}' % (sys.executable, self.test_precompiler)
@@ -101,10 +97,60 @@ class PrecompilerTestCase(TestCase):
         compiler = CompilerFilter(content=self.content, filename=self.filename, command=command)
         self.assertEqual(type(compiler.input()), six.text_type)
 
+    def test_precompiler_cache(self):
+        command = '%s %s -f {infile} -o {outfile}' % (sys.executable, self.test_precompiler)
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        # We tell whether the precompiler actually ran by inspecting compiler.infile. If not None, the compiler had to
+        # write the input out to the file for the external command. If None, it was in the cache and thus skipped.
+        self.assertIsNotNone(compiler.infile)  # Not cached
 
-class CssMinTestCase(TestCase):
-    def test_cssmin_filter(self):
-        content = """p {
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        self.assertIsNone(compiler.infile)  # Cached
+
+        self.cached_precompiler_args['content'] += ' '  # Invalidate cache by slightly changing content
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        self.assertIsNotNone(compiler.infile)  # Not cached
+
+    @mock.patch('django.core.cache.backends.locmem.LocMemCache.get')
+    def test_precompiler_cache_issue750(self, mock_cache):
+        # emulate memcached and return string
+        mock_cache.side_effect = (lambda key: str("body { color:#990; }"))
+        command = '%s %s -f {infile} -o {outfile}' % (sys.executable, self.test_precompiler)
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        self.assertEqual(type(compiler.input()), type(smart_text("body { color:#990; }")))
+
+    def test_precompiler_not_cacheable(self):
+        command = '%s %s -f {infile} -o {outfile}' % (sys.executable, self.test_precompiler)
+        self.cached_precompiler_args['mimetype'] = 'text/different'
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        self.assertIsNotNone(compiler.infile)  # Not cached
+
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+        self.assertIsNotNone(compiler.infile)  # Not cached
+
+    def test_precompiler_caches_empty_files(self):
+        command = '%s %s -f {infile} -o {outfile}' % (sys.executable, self.test_precompiler)
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("body { color:#990; }", compiler.input())
+
+        cache.set(compiler.get_cache_key(), "")
+        compiler = CachedCompilerFilter(command=command, **self.cached_precompiler_args)
+        self.assertEqual("", compiler.input())
+
+
+class CSSCompressorTestCase(TestCase):
+    def test_csscompressor_filter(self):
+        content = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */
+        p {
 
 
         background: rgb(51,102,153) url('../../images/image.gif');
@@ -112,10 +158,52 @@ class CssMinTestCase(TestCase):
 
         }
         """
-        output = "p{background:#369 url('../../images/image.gif')}"
-        self.assertEqual(output, CSSMinFilter(content).output())
+        output = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */p{background:#369 url('../../images/image.gif')}"""
+        self.assertEqual(output, CSSCompressorFilter(content).output())
 
 
+class rCssMinTestCase(TestCase):
+    def test_rcssmin_filter(self):
+        content = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */
+        p {
+
+
+        background: rgb(51,102,153) url('../../images/image.gif');
+
+
+        }
+        """
+        output = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */p{background:rgb(51,102,153) url('../../images/image.gif')}"""
+        self.assertEqual(output, rCSSMinFilter(content).output())
+
+
+class JsMinTestCase(TestCase):
+    def test_jsmin_filter(self):
+        content = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */
+        var foo = "bar";"""
+        output = """/*!
+ * django-compressor
+ * Copyright (c) 2009-2014 Django Compressor authors
+ */var foo="bar";"""
+        self.assertEqual(output, JSMinFilter(content).output())
+
+
+@override_settings(
+        COMPRESS_ENABLED=True,
+        COMPRESS_URL='/static/',
+)
 class CssAbsolutizingTestCase(TestCase):
     hashing_method = 'mtime'
     hashing_func = staticmethod(get_hashed_mtime)
@@ -123,12 +211,9 @@ class CssAbsolutizingTestCase(TestCase):
                 "p { filter: Alpha(src='%(url)simg/python.png%(query)s%(hash)s%(frag)s') }")
 
     def setUp(self):
-        self.old_enabled = settings.COMPRESS_ENABLED
-        self.old_url = settings.COMPRESS_URL
-        self.old_hashing_method = settings.COMPRESS_CSS_HASHING_METHOD
-        settings.COMPRESS_ENABLED = True
-        settings.COMPRESS_URL = '/static/'
-        settings.COMPRESS_CSS_HASHING_METHOD = self.hashing_method
+        self.override_settings = self.settings(COMPRESS_CSS_HASHING_METHOD=self.hashing_method)
+        self.override_settings.__enter__()
+
         self.css = """
         <link rel="stylesheet" href="/static/css/url/url1.css" type="text/css">
         <link rel="stylesheet" href="/static/css/url/2/url2.css" type="text/css">
@@ -136,22 +221,15 @@ class CssAbsolutizingTestCase(TestCase):
         self.css_node = CssCompressor(self.css)
 
     def tearDown(self):
-        settings.COMPRESS_ENABLED = self.old_enabled
-        settings.COMPRESS_URL = self.old_url
-        settings.COMPRESS_CSS_HASHING_METHOD = self.old_hashing_method
+        self.override_settings.__exit__(None, None, None)
 
+    @override_settings(COMPRESS_CSS_HASHING_METHOD=None)
     def test_css_no_hash(self):
-        settings.COMPRESS_CSS_HASHING_METHOD = None
         filename = os.path.join(settings.COMPRESS_ROOT, 'css/url/test.css')
         content = self.template % blankdict(url='../../')
         params = blankdict({
             'url': settings.COMPRESS_URL,
         })
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
-        settings.COMPRESS_URL = params['url'] = 'http://static.example.com/'
         output = self.template % params
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
@@ -164,11 +242,6 @@ class CssAbsolutizingTestCase(TestCase):
             'url': settings.COMPRESS_URL,
             'hash': '?' + self.hashing_func(imagefilename),
         })
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
-        settings.COMPRESS_URL = params['url'] = 'http://static.example.com/'
         output = self.template % params
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
@@ -186,18 +259,15 @@ class CssAbsolutizingTestCase(TestCase):
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
 
-        settings.COMPRESS_URL = params['url'] = 'http://media.example.com/'
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
     def test_css_absolute_filter_only_url_fragment(self):
         filename = os.path.join(settings.COMPRESS_ROOT, 'css/url/test.css')
         content = "p { background: url('#foo') }"
         filter = CssAbsoluteFilter(content)
         self.assertEqual(content, filter.input(filename=filename, basename='css/url/test.css'))
 
-        settings.COMPRESS_URL = 'http://media.example.com/'
+    def test_css_absolute_filter_only_url_fragment_wrap_double_quotes(self):
+        filename = os.path.join(settings.COMPRESS_ROOT, 'css/url/test.css')
+        content = 'p { background: url("#foo") }'
         filter = CssAbsoluteFilter(content)
         self.assertEqual(content, filter.input(filename=filename, basename='css/url/test.css'))
 
@@ -214,27 +284,9 @@ class CssAbsolutizingTestCase(TestCase):
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
 
-        settings.COMPRESS_URL = params['url'] = 'http://media.example.com/'
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
     def test_css_absolute_filter_https(self):
-        filename = os.path.join(settings.COMPRESS_ROOT, 'css/url/test.css')
-        imagefilename = os.path.join(settings.COMPRESS_ROOT, 'img/python.png')
-        content = self.template % blankdict(url='../../')
-        params = blankdict({
-            'url': settings.COMPRESS_URL,
-            'hash': '?' + self.hashing_func(imagefilename),
-        })
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
-        settings.COMPRESS_URL = params['url'] = 'https://static.example.com/'
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
+        with self.settings(COMPRESS_URL='https://static.example.com/'):
+            self.test_css_absolute_filter()
 
     def test_css_absolute_filter_relative_path(self):
         filename = os.path.join(settings.TEST_DIR, 'whatever', '..', 'static', 'whatever/../css/url/test.css')
@@ -248,11 +300,6 @@ class CssAbsolutizingTestCase(TestCase):
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
 
-        settings.COMPRESS_URL = params['url'] = 'https://static.example.com/'
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
-
     def test_css_absolute_filter_filename_outside_compress_root(self):
         filename = '/foo/bar/baz/test.css'
         content = self.template % blankdict(url='../qux/')
@@ -262,40 +309,55 @@ class CssAbsolutizingTestCase(TestCase):
         output = self.template % params
         filter = CssAbsoluteFilter(content)
         self.assertEqual(output, filter.input(filename=filename, basename='bar/baz/test.css'))
-        settings.COMPRESS_URL = 'https://static.example.com/'
-        params['url'] = settings.COMPRESS_URL + 'bar/qux/'
-        output = self.template % params
-        filter = CssAbsoluteFilter(content)
-        self.assertEqual(output, filter.input(filename=filename, basename='bar/baz/test.css'))
 
     def test_css_hunks(self):
-        hash_dict = {
-            'hash1': self.hashing_func(os.path.join(settings.COMPRESS_ROOT, 'img/python.png')),
-            'hash2': self.hashing_func(os.path.join(settings.COMPRESS_ROOT, 'img/add.png')),
-        }
-        self.assertEqual(["""\
-p { background: url('/static/img/python.png?%(hash1)s'); }
-p { background: url('/static/img/python.png?%(hash1)s'); }
-p { background: url('/static/img/python.png?%(hash1)s'); }
-p { background: url('/static/img/python.png?%(hash1)s'); }
-p { filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src='/static/img/python.png?%(hash1)s'); }
-""" % hash_dict,
-               """\
-p { background: url('/static/img/add.png?%(hash2)s'); }
-p { background: url('/static/img/add.png?%(hash2)s'); }
-p { background: url('/static/img/add.png?%(hash2)s'); }
-p { background: url('/static/img/add.png?%(hash2)s'); }
-p { filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src='/static/img/add.png?%(hash2)s'); }
-""" % hash_dict], list(self.css_node.hunks()))
+        hash_python_png = self.hashing_func(os.path.join(settings.COMPRESS_ROOT, 'img/python.png'))
+        hash_add_png = self.hashing_func(os.path.join(settings.COMPRESS_ROOT, 'img/add.png'))
+
+        css1 = """\
+p { background: url('%(compress_url)simg/python.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/python.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/python.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/python.png?%(hash)s'); }
+p { filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src='%(compress_url)simg/python.png?%(hash)s'); }
+""" % dict(compress_url=settings.COMPRESS_URL, hash=hash_python_png)
+
+        css2 = """\
+p { background: url('%(compress_url)simg/add.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/add.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/add.png?%(hash)s'); }
+p { background: url('%(compress_url)simg/add.png?%(hash)s'); }
+p { filter: progid:DXImageTransform.Microsoft.AlphaImageLoader(src='%(compress_url)simg/add.png?%(hash)s'); }
+""" % dict(compress_url=settings.COMPRESS_URL, hash=hash_add_png)
+
+        self.assertEqual([css1, css2], list(self.css_node.hunks()))
 
     def test_guess_filename(self):
-        for base_url in ('/static/', 'http://static.example.com/'):
-            settings.COMPRESS_URL = base_url
-            url = '%s/img/python.png' % settings.COMPRESS_URL.rstrip('/')
-            path = os.path.join(settings.COMPRESS_ROOT, 'img/python.png')
-            content = "p { background: url('%s') }" % url
-            filter = CssAbsoluteFilter(content)
-            self.assertEqual(path, filter.guess_filename(url))
+        url = '%s/img/python.png' % settings.COMPRESS_URL.rstrip('/')
+        path = os.path.join(settings.COMPRESS_ROOT, 'img/python.png')
+        content = "p { background: url('%s') }" % url
+        filter = CssAbsoluteFilter(content)
+        self.assertEqual(path, filter.guess_filename(url))
+
+    def test_filenames_with_space(self):
+        filename = os.path.join(settings.COMPRESS_ROOT, 'css/url/test.css')
+        imagefilename = os.path.join(settings.COMPRESS_ROOT, 'img/add with spaces.png')
+
+        template = "p { background: url('%(url)simg/add with spaces.png%(query)s%(hash)s%(frag)s') }"
+
+        content = template % blankdict(url='../../')
+        params = blankdict({
+            'url': settings.COMPRESS_URL,
+            'hash': '?' + self.hashing_func(imagefilename),
+        })
+        output = template % params
+        filter = CssAbsoluteFilter(content)
+        self.assertEqual(output, filter.input(filename=filename, basename='css/url/test.css'))
+
+
+@override_settings(COMPRESS_URL='http://static.example.com/')
+class CssAbsolutizingTestCaseWithDifferentURL(CssAbsolutizingTestCase):
+    pass
 
 
 class CssAbsolutizingTestCaseWithHash(CssAbsolutizingTestCase):
@@ -303,15 +365,17 @@ class CssAbsolutizingTestCaseWithHash(CssAbsolutizingTestCase):
     hashing_func = staticmethod(get_hashed_content)
 
 
+@override_settings(
+    COMPRESS_ENABLED=True,
+    COMPRESS_CSS_FILTERS=[
+        'compressor.filters.css_default.CssAbsoluteFilter',
+        'compressor.filters.datauri.CssDataUriFilter',
+    ],
+    COMPRESS_URL='/static/',
+    COMPRESS_CSS_HASHING_METHOD='mtime'
+)
 class CssDataUriTestCase(TestCase):
     def setUp(self):
-        settings.COMPRESS_ENABLED = True
-        settings.COMPRESS_CSS_FILTERS = [
-            'compressor.filters.css_default.CssAbsoluteFilter',
-            'compressor.filters.datauri.CssDataUriFilter',
-        ]
-        settings.COMPRESS_URL = '/static/'
-        settings.COMPRESS_CSS_HASHING_METHOD = 'mtime'
         self.css = """
         <link rel="stylesheet" href="/static/css/datauri.css" type="text/css">
         """
@@ -351,10 +415,6 @@ class SpecializedFiltersTest(TestCase):
     def test_closure_filter(self):
         filter = ClosureCompilerFilter('')
         self.assertEqual(filter.options, (('binary', six.text_type('java -jar compiler.jar')), ('args', six.text_type(''))))
-
-    def test_csstidy_filter(self):
-        filter = CSSTidyFilter('')
-        self.assertEqual(filter.options, (('binary', six.text_type('csstidy')), ('args', six.text_type('--template=highest'))))
 
     def test_yuglify_filters(self):
         filter = YUglifyCSSFilter('')

@@ -87,18 +87,6 @@ Backend settings
          feature, and the ``'content'`` in case you're using multiple servers
          to serve your content.
 
-    - ``compressor.filters.csstidy.CSSTidyFilter``
-
-      A filter that passes the CSS content to the CSSTidy_ tool.
-
-      .. attribute:: COMPRESS_CSSTIDY_BINARY
-
-         The CSSTidy binary filesystem path.
-
-      .. attribute:: COMPRESS_CSSTIDY_ARGUMENTS
-
-         The arguments passed to CSSTidy.
-
     - ``compressor.filters.datauri.CssDataUriFilter``
 
       A filter for embedding media as `data: URIs`_ in the CSS.
@@ -132,27 +120,34 @@ Backend settings
 
          The arguments passed to the compressor. Defaults to --terminal.
 
-    - ``compressor.filters.cssmin.CSSMinFilter``
+    .. _csscompressor_filter:
 
-      A filter that uses Zachary Voase's Python port of the YUI CSS compression
-      algorithm cssmin_.
+    - ``compressor.filters.cssmin.CSSCompressorFilter``
+
+      A filter that uses Yury Selivanov's Python port of the YUI CSS compression
+      algorithm csscompressor_.
+
+    - ``compressor.filters.cssmin.rCSSMinFilter``
+
+      A filter that uses the cssmin implementation rCSSmin_ to compress CSS
+      (installed by default).
 
     - ``compressor.filters.cleancss.CleanCSSFilter``
 
       A filter that passes the CSS content to the `clean-css`_ tool.
 
-      .. attribute:: CLEAN_CSS_BINARY
+      .. attribute:: COMPRESS_CLEAN_CSS_BINARY
 
          The clean-css binary filesystem path.
 
-      .. attribute:: CLEAN_CSS_ARGUMENTS
+      .. attribute:: COMPRESS_CLEAN_CSS_ARGUMENTS
 
          The arguments passed to clean-css.
 
 
-    .. _CSSTidy: http://csstidy.sourceforge.net/
     .. _`data: URIs`: http://en.wikipedia.org/wiki/Data_URI_scheme
-    .. _cssmin: http://pypi.python.org/pypi/cssmin/
+    .. _csscompressor: http://pypi.python.org/pypi/csscompressor/
+    .. _rCSSmin: http://opensource.perlig.de/rcssmin/
     .. _`clean-css`: https://github.com/GoalSmashers/clean-css/
 
 
@@ -178,7 +173,7 @@ Backend settings
     - ``compressor.filters.jsmin.JSMinFilter``
 
       A filter that uses the jsmin implementation rJSmin_ to compress
-      JavaScript code.
+      JavaScript code (installed by default).
 
     .. _slimit_filter:
 
@@ -274,8 +269,8 @@ Backend settings
     .. note::
         Depending on the implementation, some precompilers might not support
         outputting to something else than ``stdout``, so you'll need to omit the
-        ``{outfile}`` parameter when working with those. For instance, if you 
-        are using the Ruby version of lessc, you'll need to set up the 
+        ``{outfile}`` parameter when working with those. For instance, if you
+        are using the Ruby version of lessc, you'll need to set up the
         precompiler like this::
 
             ('text/less', 'lessc {infile}'),
@@ -412,6 +407,19 @@ Caching settings
     :attr:`~django.conf.settings.COMPRESS_REBUILD_TIMEOUT` and
     :attr:`~django.conf.settings.COMPRESS_MINT_DELAY`.
 
+.. attribute:: COMPRESS_CACHEABLE_PRECOMPILERS
+
+    :Default: ``()``
+
+    An iterable of precompiler mimetypes as defined in :attr:`~django.conf.settings.COMPRESS_PRECOMPILERS`
+    for which the compiler output can be cached based solely on the contents
+    of the input file. This lets Django Compressor avoid recompiling unchanged
+    files. Caching is appropriate for compilers such as CoffeeScript where files
+    are compiled one-to-one, but not for compilers such as SASS that have an
+    ``import`` mechanism for including one file from another. If caching is enabled
+    for such a compiler, Django Compressor will not know to recompile files when a file
+    they import is modified.
+
 .. attribute:: COMPRESS_DEBUG_TOGGLE
 
     :Default: None
@@ -434,11 +442,11 @@ Caching settings
         and the ``django.core.context_processors.request`` context processor.
 
     .. _RequestContext: http://docs.djangoproject.com/en/dev/ref/templates/api/#django.template.RequestContext
-    
+
 .. attribute:: COMPRESS_CACHE_KEY_FUNCTION
 
     :Default: ``'compressor.cache.simple_cachekey'``
-    
+
     The function to use when generating the cache key. The function must take
     one argument which is the partial key based on the source's hex digest.
     It must return the full key as a string.
@@ -450,10 +458,8 @@ Offline settings
 
     :Default: ``False``
 
-    Boolean that decides if compression should also be done outside of the
-    request/response loop -- independent from user requests. This allows to
-    pre-compress CSS and JavaScript files and works just like the automatic
-    compression with the ``{% compress %}`` tag.
+    Boolean that decides if compression should be done outside of the
+    request/response loop. See :ref:`offline_compression` for details.
 
 .. attribute:: COMPRESS_OFFLINE_TIMEOUT
 
@@ -472,6 +478,37 @@ Offline settings
     offline cache.
 
     If available, the ``STATIC_URL`` setting is also added to the context.
+
+    .. note::
+
+        It is also possible to perform offline compression for multiple
+        contexts by providing a list or tuple of dictionaries, or by providing
+        a dotted string pointing to a generator function.
+
+        This makes it easier to generate contexts dynamically for situations
+        where a user might be able to select a different theme in their user
+        profile, or be served different stylesheets based on other criteria.
+
+        An example of multiple offline contexts by providing a list or tuple::
+
+            # project/settings.py:
+            COMPRESS_OFFLINE_CONTEXT = [
+                {'THEME': 'plain', 'STATIC_URL': STATIC_URL},
+                {'THEME': 'fancy', 'STATIC_URL': STATIC_URL},
+                # ...
+            ]
+
+        An example of multiple offline contexts generated dynamically::
+
+            # project/settings.py:
+            COMPRESS_OFFLINE_CONTEXT = 'project.module.offline_context'
+
+            # project/module.py:
+            from django.conf import settings
+            def offline_context():
+                from project.models import Company
+                for theme in set(Company.objects.values_list('theme', flat=True)):
+                    yield {'THEME': theme, 'STATIC_URL': settings.STATIC_URL}
 
 .. attribute:: COMPRESS_OFFLINE_MANIFEST
 

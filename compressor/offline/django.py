@@ -1,34 +1,29 @@
 from __future__ import absolute_import
 from copy import copy
 
-import django
 from django import template
-from django.conf import settings
 from django.template import Context
 from django.template.base import Node, VariableNode, TextNode, NodeList
 from django.template.defaulttags import IfNode
 from django.template.loader import get_template
-from django.template.loader_tags import ExtendsNode, BlockNode, BlockContext
+from django.template.loader_tags import BLOCK_CONTEXT_KEY, ExtendsNode, BlockNode, BlockContext
 
 
 from compressor.exceptions import TemplateSyntaxError, TemplateDoesNotExist
 from compressor.templatetags.compress import CompressorNode
 
 
-def handle_extendsnode(extendsnode, block_context=None, original=None):
+def handle_extendsnode(extendsnode, context):
     """Create a copy of Node tree of a derived template replacing
     all blocks tags with the nodes of appropriate blocks.
     Also handles {{ block.super }} tags.
     """
-    if block_context is None:
-        block_context = BlockContext()
+    if BLOCK_CONTEXT_KEY not in context.render_context:
+        context.render_context[BLOCK_CONTEXT_KEY] = BlockContext()
+    block_context = context.render_context[BLOCK_CONTEXT_KEY]
     blocks = dict((n.name, n) for n in
                   extendsnode.nodelist.get_nodes_by_type(BlockNode))
     block_context.add_blocks(blocks)
-
-    context = Context(settings.COMPRESS_OFFLINE_CONTEXT)
-    if original is not None:
-        context.template = original
 
     compiled_parent = extendsnode.get_parent(context)
     parent_nodelist = compiled_parent.nodelist
@@ -37,7 +32,7 @@ def handle_extendsnode(extendsnode, block_context=None, original=None):
         # The ExtendsNode has to be the first non-text node.
         if not isinstance(node, TextNode):
             if isinstance(node, ExtendsNode):
-                return handle_extendsnode(node, block_context, original)
+                return handle_extendsnode(node, context)
             break
     # Add blocks of the root template to block context.
     blocks = dict((n.name, n) for n in
@@ -99,10 +94,7 @@ class DjangoParser(object):
 
     def parse(self, template_name):
         try:
-            if django.VERSION < (1, 8):
-                return get_template(template_name)
-            else:
-                return get_template(template_name).template
+            return get_template(template_name).template
         except template.TemplateSyntaxError as e:
             raise TemplateSyntaxError(str(e))
         except template.TemplateDoesNotExist as e:
@@ -118,17 +110,19 @@ class DjangoParser(object):
         pass
 
     def render_nodelist(self, template, context, node):
-        if django.VERSION >= (1, 8):
-            context.template = template
+        context.template = template
         return node.nodelist.render(context)
 
     def render_node(self, template, context, node):
         return node.render(context, forced=True)
 
-    def get_nodelist(self, node, original=None):
+    def get_nodelist(self, node, original, context=None):
         if isinstance(node, ExtendsNode):
             try:
-                return handle_extendsnode(node, block_context=None, original=original)
+                if context is None:
+                    context = Context()
+                context.template = original
+                return handle_extendsnode(node, context)
             except template.TemplateSyntaxError as e:
                 raise TemplateSyntaxError(str(e))
             except template.TemplateDoesNotExist as e:
@@ -143,12 +137,13 @@ class DjangoParser(object):
             nodelist = getattr(node, 'nodelist', [])
         return nodelist
 
-    def walk_nodes(self, node, original=None):
-        if django.VERSION >= (1, 8) and original is None:
+    def walk_nodes(self, node, original=None, context=None):
+        if original is None:
             original = node
-        for node in self.get_nodelist(node, original):
-            if isinstance(node, CompressorNode) and node.is_offline_compression_enabled(forced=True):
+        for node in self.get_nodelist(node, original, context):
+            if isinstance(node, CompressorNode) \
+                    and node.is_offline_compression_enabled(forced=True):
                 yield node
             else:
-                for node in self.walk_nodes(node, original):
+                for node in self.walk_nodes(node, original, context):
                     yield node

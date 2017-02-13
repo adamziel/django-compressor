@@ -5,9 +5,8 @@ from compressor.base import Compressor, SOURCE_HUNK, SOURCE_FILE
 class JsCompressor(Compressor):
 
     def __init__(self, content=None, output_prefix="js", context=None):
-        super(JsCompressor, self).__init__(content, output_prefix, context)
-        self.filters = list(settings.COMPRESS_JS_FILTERS)
-        self.type = output_prefix
+        filters = list(settings.COMPRESS_JS_FILTERS)
+        super(JsCompressor, self).__init__(content, output_prefix, context, filters)
 
     def split_contents(self):
         if self.split_content:
@@ -51,3 +50,20 @@ class JsCompressor(Compressor):
                     ret.append(subnode.output(*args, **kwargs))
                 return '\n'.join(ret)
         return super(JsCompressor, self).output(*args, **kwargs)
+
+    def filter_input(self, forced=False):
+        """
+        Passes each hunk (file or code) to the 'input' methods
+        of the compressor filters.
+        """
+        content = []
+        for hunk in self.hunks(forced):
+            # If a file ends with a function call, say, console.log()
+            # but doesn't have a semicolon, and the next file starts with
+            # a (, the individual files are ok, but when combined you get an
+            # error like TypeError...
+            # Forcing a semicolon in between fixes it.
+            if settings.COMPRESS_ENABLED or forced:
+                hunk = ";" + hunk
+            content.append(hunk)
+        return content

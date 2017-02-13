@@ -3,22 +3,12 @@ import hashlib
 import os
 import socket
 import time
+from importlib import import_module
 
-try:
-    from django.core.cache import caches
-    def get_cache(name):
-        return caches[name]
-except ImportError:
-    from django.core.cache import get_cache
-
+from django.core.cache import caches
 from django.core.files.base import ContentFile
 from django.utils.encoding import force_text, smart_bytes
 from django.utils.functional import SimpleLazyObject
-
-try:
-    from importlib import import_module
-except:
-    from django.utils.importlib import import_module
 
 from compressor.conf import settings
 from compressor.storage import default_storage
@@ -60,7 +50,10 @@ def get_mtime_cachekey(filename):
 
 
 def get_offline_hexdigest(render_template_string):
-    return get_hexdigest(render_template_string)
+    return get_hexdigest(
+        # Make the hexdigest determination independent of STATIC_URL
+        render_template_string.replace(settings.STATIC_URL, '')
+    )
 
 
 def get_offline_cachekey(source):
@@ -135,6 +128,10 @@ def get_hashed_content(filename, length=12):
         return get_hexdigest(file.read(), length)
 
 
+def get_precompiler_cachekey(command, contents):
+    return hashlib.sha1(smart_bytes('precompiler.%s.%s' % (command, contents))).hexdigest()
+
+
 def cache_get(key):
     packed_val = cache.get(key)
     if packed_val is None:
@@ -158,4 +155,4 @@ def cache_set(key, val, refreshed=False, timeout=None):
     return cache.set(key, packed_val, real_timeout)
 
 
-cache = SimpleLazyObject(lambda: get_cache(settings.COMPRESS_CACHE_BACKEND))
+cache = SimpleLazyObject(lambda: caches[settings.COMPRESS_CACHE_BACKEND])

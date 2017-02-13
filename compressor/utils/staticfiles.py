@@ -1,10 +1,12 @@
 from __future__ import absolute_import, unicode_literals
 
+from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
 
 from compressor.conf import settings
 
-if "django.contrib.staticfiles" in settings.INSTALLED_APPS:
+
+if apps.is_installed("django.contrib.staticfiles"):
     from django.contrib.staticfiles import finders  # noqa
 
     if ("compressor.finders.CompressorFinder"

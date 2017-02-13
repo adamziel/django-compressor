@@ -1,27 +1,30 @@
 language: python
-before_install:
-  - sudo apt-get update
-  - sudo apt-get install csstidy libxml2-dev libxslt-dev
+sudo: false
 install:
+  - if [[ $TOXENV == py32-1.8.X ]]; then pip install pip\<8.0.0 virtualenv\<14.0.0; fi
   - pip install tox
 script:
   - tox
 env:
-  - TOXENV=py26-1.4.X
-  - TOXENV=py26-1.5.X
-  - TOXENV=py27-1.4.X
-  - TOXENV=py27-1.5.X
-  - TOXENV=py26-1.6.X
-  - TOXENV=py27-1.6.X
-  - TOXENV=py32-1.6.X
-  - TOXENV=py33-1.6.X
-  - TOXENV=py27-1.7.X
-  - TOXENV=py32-1.7.X
-  - TOXENV=py33-1.7.X
-  - TOXENV=py34-1.7.X
   - TOXENV=py27-1.8.X
   - TOXENV=py32-1.8.X
   - TOXENV=py33-1.8.X
   - TOXENV=py34-1.8.X
+  - TOXENV=py27-1.9.X
+  - TOXENV=py34-1.9.X
+  - TOXENV=py27-1.10.X
+  - TOXENV=py34-1.10.X
+# https://github.com/travis-ci/travis-ci/issues/4794
+matrix:
+  include:
+    - python: 3.5
+      env: TOXENV=py35-1.8.X
+    - python: 3.5
+      env: TOXENV=py35-1.9.X
+    - python: 3.5
+      env: TOXENV=py35-1.10.X
 notifications:
   irc: "irc.freenode.org#django-compressor"
+after_success:
+  - pip install codecov
+  - codecov

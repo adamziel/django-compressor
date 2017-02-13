@@ -2,16 +2,17 @@
 from __future__ import with_statement, unicode_literals
 
 import sys
+import unittest
 
 from django.test import TestCase
-from django.utils import unittest, six
+from django.utils import six
 from django.test.utils import override_settings
 
 from compressor.conf import settings
 from compressor.tests.test_base import css_tag
 
 
-@unittest.skipUnless(not six.PY3 or sys.version_info[:2] >= (3, 3),
+@unittest.skipIf(six.PY3 and sys.version_info[:2] < (3, 3),
                      'Jinja can only run on Python < 3 and >= 3.3')
 class TestJinja2CompressorExtension(TestCase):
     """
@@ -100,7 +101,7 @@ class TestJinja2CompressorExtension(TestCase):
         <script type="text/javascript" charset="utf-8">obj.value = "value";</script>
         {% endcompress %}""")
         context = {'STATIC_URL': settings.COMPRESS_URL}
-        out = '<script type="text/javascript" src="/static/CACHE/js/066cd253eada.js"></script>'
+        out = '<script type="text/javascript" src="/static/CACHE/js/d728fc7f9301.js"></script>'
         self.assertEqual(out, template.render(context))
 
     def test_nonascii_js_tag(self):
@@ -109,7 +110,7 @@ class TestJinja2CompressorExtension(TestCase):
         <script type="text/javascript" charset="utf-8">var test_value = "\u2014";</script>
         {% endcompress %}""")
         context = {'STATIC_URL': settings.COMPRESS_URL}
-        out = '<script type="text/javascript" src="/static/CACHE/js/e214fe629b28.js"></script>'
+        out = '<script type="text/javascript" src="/static/CACHE/js/d34f30e02e70.js"></script>'
         self.assertEqual(out, template.render(context))
 
     def test_nonascii_latin1_js_tag(self):
@@ -118,7 +119,7 @@ class TestJinja2CompressorExtension(TestCase):
         <script type="text/javascript">var test_value = "\u2014";</script>
         {% endcompress %}""")
         context = {'STATIC_URL': settings.COMPRESS_URL}
-        out = '<script type="text/javascript" src="/static/CACHE/js/be9e078b5ca7.js"></script>'
+        out = '<script type="text/javascript" src="/static/CACHE/js/a830bddd3636.js"></script>'
         self.assertEqual(out, template.render(context))
 
     def test_css_inline(self):
@@ -139,17 +140,15 @@ class TestJinja2CompressorExtension(TestCase):
         <script type="text/javascript" charset="utf-8">obj.value = "value";</script>
         {% endcompress %}""")
         context = {'STATIC_URL': settings.COMPRESS_URL}
-        out = '<script type="text/javascript">obj={};obj.value="value";</script>'
+        out = '<script type="text/javascript">;obj={};;obj.value="value";</script>'
         self.assertEqual(out, template.render(context))
 
     def test_nonascii_inline_css(self):
-        org_COMPRESS_ENABLED = settings.COMPRESS_ENABLED
-        settings.COMPRESS_ENABLED = False
-        template = self.env.from_string('{% compress css %}'
-                                        '<style type="text/css">'
-                                        '/* русский текст */'
-                                        '</style>{% endcompress %}')
+        with self.settings(COMPRESS_ENABLED=False):
+            template = self.env.from_string('{% compress css %}'
+                                            '<style type="text/css">'
+                                            '/* русский текст */'
+                                            '</style>{% endcompress %}')
         out = '<link rel="stylesheet" href="/static/CACHE/css/b2cec0f8cb24.css" type="text/css" />'
-        settings.COMPRESS_ENABLED = org_COMPRESS_ENABLED
         context = {'STATIC_URL': settings.COMPRESS_URL}
         self.assertEqual(out, template.render(context))

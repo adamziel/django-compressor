@@ -2,18 +2,19 @@ Contributing
 ============
 
 Like every open-source project, Django Compressor is always looking for
-motivated individuals to contribute to it's source code.
+motivated individuals to contribute to its source code.
 However, to ensure the highest code quality and keep the repository nice and
 tidy, everybody has to follow a few rules (nothing major, I promise :) )
 
 Community
 ---------
 
-People interested in developing for the Django Compressor should head
-over to #django-compressor on the `freenode`_ IRC network for help and to
-discuss the development.
+People interested in developing for the Django Compressor should:
 
-You may also be interested in following `@jezdez`_ on Twitter.
+#. Head over to #django-compressor on the `freenode`_ IRC network for help and to
+   discuss the development.
+#. Open an issue on GitHub explaining your ideas.
+
 
 In a nutshell
 -------------
@@ -143,7 +144,7 @@ Documentation should be:
 - Accessible. You should assume the reader to be moderately familiar with
   Python and Django, but not anything else. Link to documentation of libraries
   you use, for example, even if they are "obvious" to you. A brief
-  description of what it does is also welcome. 
+  description of what it does is also welcome.
 
 Pulling of documentation is pretty fast and painless. Usually somebody goes
 over your text and merges it, since there are no "breaks" and that github
